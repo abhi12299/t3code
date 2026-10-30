@@ -25,6 +25,7 @@ import {
   ProviderTurnId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -1535,9 +1536,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         event.type === "message.updated" && event.message.role === "assistant",
     );
 
-  it.effect.each(["completed", "interrupted"] as const)(
-    "marks an asynchronous Codex question awaited until its sleep ends or the turn is %s",
-    (terminalStatus) =>
+  it.effect.each([
+    { terminalStatus: "completed", restored: false },
+    { terminalStatus: "interrupted", restored: false },
+    { terminalStatus: "completed", restored: true },
+  ] as const)(
+    "marks an asynchronous Codex question awaited until the turn is $terminalStatus (restored: $restored)",
+    ({ terminalStatus, restored }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const nativeThreadId = "async-question-thread";
@@ -1557,24 +1562,28 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 nativeTurnId,
                 prompt: "Continue while I decide.",
               }),
-              {
-                type: "emit_inbound",
-                label: "question",
-                frame: {
-                  method: "item/completed",
-                  params: {
-                    threadId: nativeThreadId,
-                    turnId: nativeTurnId,
-                    item: {
-                      type: "agentMessage",
-                      id: "async-question-item",
-                      text: "Which branch?",
-                      delivery: "async",
-                      questions: [{ title: "Which branch?", options: ["main", "dev"] }],
-                    },
-                  },
-                },
-              },
+              ...(restored
+                ? []
+                : [
+                    {
+                      type: "emit_inbound",
+                      label: "question",
+                      frame: {
+                        method: "item/completed",
+                        params: {
+                          threadId: nativeThreadId,
+                          turnId: nativeTurnId,
+                          item: {
+                            type: "agentMessage",
+                            id: "async-question-item",
+                            text: "Which branch?",
+                            delivery: "async",
+                            questions: [{ title: "Which branch?", options: ["main", "dev"] }],
+                          },
+                        },
+                      },
+                    } as const,
+                  ]),
               // An interrupted turn ends without completing the sleep item.
               ...(terminalStatus === "completed"
                 ? (["item/started", "item/completed"] as const)
@@ -1619,32 +1628,55 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ],
           });
           const harness = yield* makeCodexReplayHarness(transcript);
-          yield* harness.runtime.startTurn(
-            makeCodexTestTurnInput({
+          const now = yield* DateTime.now;
+          const restoredRequest: OrchestrationV2RuntimeRequest = {
+            id: RuntimeRequestId.make("restored-question"),
+            nodeId: NodeId.make("restored-question-node"),
+            providerTurnId: null,
+            nativeRequestRef: {
+              driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+              nativeId: "async:prior-question",
+              strength: "strong",
+            },
+            kind: "user_input",
+            status: "pending",
+            responseCapability: { type: "message" },
+            createdAt: now,
+            resolvedAt: null,
+          };
+          const turnInput = {
+            ...makeCodexTestTurnInput({
               threadId: harness.threadId,
               providerThread: harness.providerThread,
-              now: yield* DateTime.now,
+              now,
               attemptId: RunAttemptId.make("async-question-attempt"),
               text: "Continue while I decide.",
             }),
-          );
+            pendingUserInputRequests: restored ? [restoredRequest] : [],
+          };
+          yield* harness.runtime.startTurn(turnInput);
           yield* harness.firstTerminal;
           const requests = harness.events.flatMap((event) =>
             event.type === "runtime_request.updated" ? [event.runtimeRequest] : [],
           );
           assert.deepEqual(
             requests.map((request) => [request.status, request.responseCapability]),
-            [
-              ["pending", { type: "message" }],
-              ["pending", { type: "message", agentWaiting: true }],
-              ["pending", { type: "message" }],
-            ],
+            restored
+              ? [
+                  ["pending", { type: "message", agentWaiting: true }],
+                  ["pending", { type: "message" }],
+                ]
+              : [
+                  ["pending", { type: "message" }],
+                  ["pending", { type: "message", agentWaiting: true }],
+                  ["pending", { type: "message" }],
+                ],
           );
           const questionItem = harness.events.find(
             (event) =>
               event.type === "turn_item.updated" && event.turnItem.type === "user_input_request",
           );
-          assert.equal(questionItem?.type, "turn_item.updated");
+          assert.equal(questionItem?.type, restored ? undefined : "turn_item.updated");
           if (
             questionItem?.type === "turn_item.updated" &&
             questionItem.turnItem.type === "user_input_request"

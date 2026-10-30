@@ -1962,7 +1962,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             startedAt: input.startedAt,
             itemPositions: new Map(),
             fileChangeKindsByItem: new Map(),
-            asyncQuestions: new Map(),
+            asyncQuestions: new Map(
+              (input.turnInput.pendingUserInputRequests ?? [])
+                .filter((request) => request.nativeRequestRef?.driver === CODEX_PROVIDER)
+                .map((request) => [String(request.id), request]),
+            ),
             runningCompactionItemIds: new Set(),
           };
           const nativeThreadId = input.turnInput.providerThread.nativeThreadRef?.nativeId;
